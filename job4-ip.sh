@@ -161,10 +161,12 @@ echo ""
 ################################################################################
 # STAGE 1.5: PUBLIC SUBNET SETUP
 ################################################################################
+
 echo "→ Checking for public subnet: ${PUBLIC_SUBNET_NAME}..."
 
 PUBLIC_SUBNET_ID=$(ibmcloud pi subnet list --json 2>/dev/null | jq -r \
-    --arg name "$PUBLIC_SUBNET_NAME" '.[] | select(.name == $name) | .id' | head -n 1)
+    --arg name "$PUBLIC_SUBNET_NAME" \
+    'if type == "array" then .[] | select(.name == $name) | .id else empty end' 2>/dev/null | head -n 1)
 
 if [[ -n "$PUBLIC_SUBNET_ID" && "$PUBLIC_SUBNET_ID" != "null" ]]; then
     echo "✓ Public subnet exists: ${PUBLIC_SUBNET_ID}"
