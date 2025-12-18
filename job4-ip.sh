@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 ################################################################################
-# JOB 1: EMPTY IBMi LPAR PROVISIONING WITH PUBLIC IP
+# JOB 1: EMPTY IBMi LPAR PROVISIONING WITH PUBLIC IP (DUAL-HOMED)
 # Purpose: Create an empty IBMi LPAR with both private and public IP addresses
 # Dependencies: IBM Cloud CLI, PowerVS plugin, jq
 ################################################################################
@@ -29,7 +29,7 @@ set -eu
 echo ""
 echo "============================================================================"
 echo " JOB 1: EMPTY IBMi LPAR PROVISIONING WITH PUBLIC IP"
-echo " Purpose: Create snapshot-ready LPAR for backup operations"
+echo " Purpose: Create snapshot-ready LPAR with dual-homed network access"
 echo "============================================================================"
 echo ""
 
@@ -44,15 +44,16 @@ readonly REGION="us-south"
 readonly RESOURCE_GROUP="Default"
 
 # PowerVS Workspace Configuration
-readonly PVS_CRN="crn:v1:bluemix:public:power-iaas:dal10:a/db1a8b544a184fd7ac339c243684a9b7:973f4d55-9056-4848-8ed0-4592093161d2::" #workspace crn
-readonly CLOUD_INSTANCE_ID="973f4d55-9056-4848-8ed0-4592093161d2" #workspace ID
+readonly PVS_CRN="crn:v1:bluemix:public:power-iaas:dal10:a/db1a8b544a184fd7ac339c243684a9b7:973f4d55-9056-4848-8ed0-4592093161d2::"
+readonly CLOUD_INSTANCE_ID="973f4d55-9056-4848-8ed0-4592093161d2"
 readonly API_VERSION="2024-02-28"
 
 # Network Configuration
-readonly SUBNET_ID="4bc0ea5a-f5b5-4874-9e41-891c147ff0a8"
+readonly PRIVATE_SUBNET_ID="4bc0ea5a-f5b5-4874-9e41-891c147ff0a8"  # Existing private subnet
 readonly PRIVATE_IP="192.168.0.69"
+readonly PUBLIC_SUBNET_NAME="public-net-ibmi-backup"  # Public subnet to create/use
 readonly KEYPAIR_NAME="murph2"
-readonly ASSIGN_PUBLIC_IP="Yes"  # Set to "No" to skip public IP assignment
+readonly ASSIGN_PUBLIC_IP="Yes"  # Set to "No" for private-only deployment
 
 # LPAR Specifications
 readonly LPAR_NAME="murphy-prod-clone"
@@ -72,6 +73,7 @@ readonly INITIAL_WAIT=45
 CURRENT_STEP="INITIALIZATION"
 LPAR_INSTANCE_ID=""
 IAM_TOKEN=""
+PUBLIC_SUBNET_ID=""
 PUBLIC_IP=""
 JOB_SUCCESS=0
 
@@ -84,7 +86,8 @@ echo ""
 # Logic:
 #   1. Identifies the failed step for debugging
 #   2. Attempts to delete partially created LPAR if instance ID exists
-#   3. Logs cleanup status and exits with failure code
+#   3. Does NOT delete public subnet (reusable resource)
+#   4. Logs cleanup status and exits with failure code
 ################################################################################
 rollback() {
     echo ""
@@ -108,6 +111,15 @@ rollback() {
         echo "No LPAR instance ID found - skipping resource cleanup"
     fi
     
+    # Note: Public subnet is NOT deleted during rollback
+    # It's a reusable resource and doesn't incur charges
+    if [[ -n "${PUBLIC_SUBNET_ID}" ]]; then
+        echo ""
+        echo "Note: Public subnet preserved (reusable resource)"
+        echo "  Name: ${PUBLIC_SUBNET_NAME}"
+        echo "  ID: ${PUBLIC_SUBNET_ID}"
+    fi
+    
     echo ""
     echo "Rollback complete. Exiting with failure status."
     echo "========================================================================"
@@ -119,10 +131,6 @@ trap rollback ERR
 
 ################################################################################
 # STAGE 1: IBM CLOUD AUTHENTICATION & WORKSPACE TARGETING
-# Logic:
-#   1. Authenticate using API key
-#   2. Target the specified resource group
-#   3. Target the PowerVS workspace for all subsequent operations
 ################################################################################
 CURRENT_STEP="IBM_CLOUD_LOGIN"
 
@@ -159,7 +167,74 @@ echo "------------------------------------------------------------------------"
 echo ""
 
 ################################################################################
-# STAGE 1.5: IAM TOKEN RETRIEVAL
+# STAGE 1.5: PUBLIC SUBNET CREATION (IF NEEDED)
+# Logic:
+#   1. Check if public subnet already exists
+#   2. If not, create new public subnet
+#   3. Extract and store public subnet ID for LPAR creation
+# Note: This stage only runs if ASSIGN_PUBLIC_IP=Yes
+################################################################################
+if [[ "${ASSIGN_PUBLIC_IP}" == "Yes" ]]; then
+    CURRENT_STEP="PUBLIC_SUBNET_SETUP"
+    
+    echo "========================================================================"
+    echo " STAGE 1.5: PUBLIC SUBNET SETUP"
+    echo "========================================================================"
+    echo ""
+    
+    echo "→ Checking for existing public subnet: ${PUBLIC_SUBNET_NAME}..."
+    
+    # Query existing subnets
+    EXISTING_SUBNETS=$(ibmcloud pi subnet list --json 2>/dev/null)
+    
+    # Check if public subnet already exists
+    PUBLIC_SUBNET_ID=$(echo "$EXISTING_SUBNETS" | jq -r \
+        --arg name "$PUBLIC_SUBNET_NAME" \
+        '.[] | select(.name == $name) | .id' 2>/dev/null | head -n 1)
+    
+    if [[ -n "$PUBLIC_SUBNET_ID" && "$PUBLIC_SUBNET_ID" != "null" ]]; then
+        echo "✓ Public subnet already exists"
+        echo "  Name: ${PUBLIC_SUBNET_NAME}"
+        echo "  ID: ${PUBLIC_SUBNET_ID}"
+    else
+        echo "→ Public subnet not found - creating new public subnet..."
+        
+        # Create public subnet
+        CREATE_RESPONSE=$(ibmcloud pi subnet create "$PUBLIC_SUBNET_NAME" \
+            --net-type public \
+            --json 2>&1)
+        
+        # Extract subnet ID from response
+        PUBLIC_SUBNET_ID=$(echo "$CREATE_RESPONSE" | jq -r '.id // .networkID // empty' 2>/dev/null)
+        
+        if [[ -z "$PUBLIC_SUBNET_ID" || "$PUBLIC_SUBNET_ID" == "null" ]]; then
+            echo "✗ ERROR: Failed to create public subnet"
+            echo ""
+            echo "Response:"
+            echo "$CREATE_RESPONSE"
+            exit 1
+        fi
+        
+        echo "✓ Public subnet created successfully"
+        echo "  Name: ${PUBLIC_SUBNET_NAME}"
+        echo "  ID: ${PUBLIC_SUBNET_ID}"
+        echo ""
+        echo "  Note: This subnet is reusable across multiple LPARs"
+        echo "  No charges for the subnet itself, only for data transfer"
+    fi
+    
+    echo ""
+    echo "------------------------------------------------------------------------"
+    echo " Stage 1.5 Complete: Public subnet ready"
+    echo "------------------------------------------------------------------------"
+    echo ""
+else
+    echo "→ Public IP disabled - skipping public subnet setup"
+    echo ""
+fi
+
+################################################################################
+# STAGE 1.75: IAM TOKEN RETRIEVAL
 # Logic:
 #   1. Exchange API key for IAM bearer token via OAuth endpoint
 #   2. Parse JSON response to extract access token
@@ -189,22 +264,50 @@ echo "✓ IAM token retrieved successfully"
 echo ""
 
 ################################################################################
-# STAGE 2: LPAR CREATION VIA REST API
+# STAGE 2: DUAL-HOMED LPAR CREATION VIA REST API
 # Logic:
 #   1. Build JSON payload with LPAR specifications
-#   2. Submit creation request to PowerVS REST API
-#   3. Retry up to 3 times if API call fails
-#   4. Extract and validate LPAR instance ID from response
-#   5. Handle multiple possible JSON response formats
+#   2. Include BOTH private and public subnet IDs in networks array
+#   3. Submit creation request to PowerVS REST API
+#   4. Retry up to 3 times if API call fails
+#   5. Extract and validate LPAR instance ID from response
 ################################################################################
 CURRENT_STEP="CREATE_LPAR"
 
 echo "========================================================================"
-echo " STAGE 2/3: LPAR CREATION & DEPLOYMENT"
+echo " STAGE 2/3: DUAL-HOMED LPAR CREATION & DEPLOYMENT"
 echo "========================================================================"
 echo ""
 
 echo "→ Building LPAR configuration payload..."
+
+# Build networks array based on public IP setting
+if [[ "${ASSIGN_PUBLIC_IP}" == "Yes" && -n "${PUBLIC_SUBNET_ID}" ]]; then
+    echo "  Network Mode: Dual-homed (private + public)"
+    NETWORKS_JSON=$(cat <<EOF
+  "networks": [
+    {
+      "networkID": "${PRIVATE_SUBNET_ID}",
+      "ipAddress": "${PRIVATE_IP}"
+    },
+    {
+      "networkID": "${PUBLIC_SUBNET_ID}"
+    }
+  ]
+EOF
+)
+else
+    echo "  Network Mode: Private only"
+    NETWORKS_JSON=$(cat <<EOF
+  "networks": [
+    {
+      "networkID": "${PRIVATE_SUBNET_ID}",
+      "ipAddress": "${PRIVATE_IP}"
+    }
+  ]
+EOF
+)
+fi
 
 # Construct JSON payload for LPAR creation
 PAYLOAD=$(cat <<EOF
@@ -216,14 +319,8 @@ PAYLOAD=$(cat <<EOF
   "sysType": "${SYS_TYPE}",
   "imageID": "${IMAGE_ID}",
   "deploymentType": "${DEPLOYMENT_TYPE}",
-  "ibmiCss": true,
   "keyPairName": "${KEYPAIR_NAME}",
-  "networks": [
-    {
-      "networkID": "${SUBNET_ID}",
-      "ipAddress": "${PRIVATE_IP}"
-    }
-  ]
+${NETWORKS_JSON}
 }
 EOF
 )
@@ -257,7 +354,6 @@ while [[ $ATTEMPTS -lt $MAX_ATTEMPTS && -z "$LPAR_INSTANCE_ID" ]]; do
     fi
     
     # Safe jq parsing - handles multiple response formats
-    # Response can be: {pvmInstanceID: "..."}, [{pvmInstanceID: "..."}], or {pvmInstance: {pvmInstanceID: "..."}}
     LPAR_INSTANCE_ID=$(echo "$RESPONSE" | jq -r '
         .pvmInstanceID? //
         (.[0].pvmInstanceID? // empty) //
@@ -282,107 +378,46 @@ fi
 
 echo "✓ LPAR creation request accepted"
 echo ""
-echo "  LPAR Details:"
-echo "  ┌────────────────────────────────────────────────────────────"
-echo "  │ Name:        ${LPAR_NAME}"
-echo "  │ Instance ID: ${LPAR_INSTANCE_ID}"
-echo "  │ Private IP:  ${PRIVATE_IP}"
-echo "  │ Subnet:      ${SUBNET_ID}"
-echo "  │ CPU Cores:   ${PROCESSORS}"
-echo "  │ Memory:      ${MEMORY_GB} GB"
-echo "  │ Proc Type:   ${PROC_TYPE}"
-echo "  │ System Type: ${SYS_TYPE}"
-echo "  └────────────────────────────────────────────────────────────"
-echo ""
 
-################################################################################
-# STAGE 2.5: PUBLIC IP ASSIGNMENT
-# Logic:
-#   1. Check if public IP assignment is enabled
-#   2. Use CLI to assign public IP to LPAR
-#   3. Query LPAR details to extract assigned public IP
-#   4. Validate public IP was assigned successfully
-################################################################################
+# Wait a moment for network assignment to process
 if [[ "${ASSIGN_PUBLIC_IP}" == "Yes" ]]; then
-    CURRENT_STEP="ASSIGN_PUBLIC_IP"
-    
-    echo "========================================================================"
-    echo " STAGE 2.5: PUBLIC IP ASSIGNMENT"
-    echo "========================================================================"
-    echo ""
-    
-    echo "→ Assigning public IP address to LPAR..."
-    echo "  (This allows SSH access from Code Engine for automated IP reconfiguration)"
-    echo ""
-    
-    # Add public network to LPAR
-    # PowerVS automatically assigns a public IP from its pool
-    set +e
-    PUBLIC_NETWORK_RESPONSE=$(ibmcloud pi instance network create "$LPAR_INSTANCE_ID" \
-        --network-type "pub-vlan" \
-        --json 2>&1)
-    PUBLIC_NETWORK_EXIT=$?
-    set -e
-    
-    if [[ $PUBLIC_NETWORK_EXIT -ne 0 ]]; then
-        echo "⚠ WARNING: Public network creation failed"
-        echo "  Attempting to query existing network configuration..."
-        echo ""
-    else
-        echo "✓ Public network attachment request submitted"
-        echo ""
-        
-        # Wait for network attachment to complete
-        echo "→ Waiting 30 seconds for public IP assignment to complete..."
-        sleep 30
-    fi
-    
-    # Query LPAR to get assigned public IP
-    echo "→ Retrieving assigned public IP address..."
-    
-    set +e
-    LPAR_DETAILS=$(ibmcloud pi instance get "$LPAR_INSTANCE_ID" --json 2>/dev/null)
-    LPAR_DETAILS_EXIT=$?
-    set -e
-    
-    if [[ $LPAR_DETAILS_EXIT -ne 0 ]]; then
-        echo "⚠ WARNING: Could not retrieve LPAR details"
-        PUBLIC_IP="Not Available - Check PowerVS Console"
-    else
-        # Try multiple possible locations for public IP in response
-        PUBLIC_IP=$(echo "$LPAR_DETAILS" | jq -r '
-            .networks[]? | select(.externalIP != null) | .externalIP // empty
-        ' 2>/dev/null | head -n 1)
-        
-        # Fallback: Try alternative JSON paths
-        if [[ -z "$PUBLIC_IP" || "$PUBLIC_IP" == "null" ]]; then
-            PUBLIC_IP=$(echo "$LPAR_DETAILS" | jq -r '
-                .addresses[]? | select(.type == "external") | .ip // empty
-            ' 2>/dev/null | head -n 1)
-        fi
-        
-        # Final fallback
-        if [[ -z "$PUBLIC_IP" || "$PUBLIC_IP" == "null" ]]; then
-            PUBLIC_IP="Assigned but not yet visible - Check PowerVS Console"
-        fi
-    fi
-    
-    echo "✓ Public IP assignment process complete"
-    echo "  Public IP: ${PUBLIC_IP}"
-    echo ""
-    echo "  Note: If public IP shows as 'Not Available', it may take a few"
-    echo "  minutes to appear. Check PowerVS console or re-query LPAR later."
-    echo ""
-    
-    echo "------------------------------------------------------------------------"
-    echo " Stage 2.5 Complete: Public IP assigned"
-    echo "------------------------------------------------------------------------"
-    echo ""
-else
-    echo "→ Public IP assignment skipped (ASSIGN_PUBLIC_IP=${ASSIGN_PUBLIC_IP})"
-    PUBLIC_IP="Not Assigned"
+    echo "→ Waiting 10 seconds for network interfaces to initialize..."
+    sleep 10
     echo ""
 fi
+
+# Query LPAR to get network details
+echo "→ Retrieving LPAR network configuration..."
+LPAR_DETAILS=$(ibmcloud pi instance get "$LPAR_INSTANCE_ID" --json 2>/dev/null || echo "{}")
+
+# Extract public IP if available
+if [[ "${ASSIGN_PUBLIC_IP}" == "Yes" ]]; then
+    PUBLIC_IP=$(echo "$LPAR_DETAILS" | jq -r '
+        .networks[]? | select(.externalIP != null) | .externalIP
+    ' 2>/dev/null | head -n 1)
+    
+    if [[ -z "$PUBLIC_IP" || "$PUBLIC_IP" == "null" ]]; then
+        PUBLIC_IP="Pending - Will be assigned during provisioning"
+    fi
+else
+    PUBLIC_IP="Not Assigned"
+fi
+
+echo ""
+echo "  LPAR Details:"
+echo "  +--------------------------------------------------------------+"
+echo "  | Name:        ${LPAR_NAME}"
+echo "  | Instance ID: ${LPAR_INSTANCE_ID}"
+echo "  | Private IP:  ${PRIVATE_IP}"
+if [[ "${ASSIGN_PUBLIC_IP}" == "Yes" ]]; then
+echo "  | Public IP:   ${PUBLIC_IP}"
+fi
+echo "  | CPU Cores:   ${PROCESSORS}"
+echo "  | Memory:      ${MEMORY_GB} GB"
+echo "  | Proc Type:   ${PROC_TYPE}"
+echo "  | System Type: ${SYS_TYPE}"
+echo "  +--------------------------------------------------------------+"
+echo ""
 
 ################################################################################
 # STAGE 3: PROVISIONING WAIT & STATUS POLLING
@@ -390,7 +425,7 @@ fi
 #   1. Initial wait for PowerVS backend to begin provisioning
 #   2. Poll instance status every 30 seconds
 #   3. Wait for SHUTOFF/STOPPED state (expected for empty LPAR)
-#   4. Timeout after specified poll limit
+#   4. Re-query for public IP once provisioning completes
 ################################################################################
 CURRENT_STEP="STATUS_POLLING"
 
@@ -429,6 +464,26 @@ while true; do
     if [[ "$STATUS" == "SHUTOFF" || "$STATUS" == "STOPPED" ]]; then
         echo ""
         echo "✓ LPAR reached final state: ${STATUS}"
+        
+        # Re-query for public IP now that provisioning is complete
+        if [[ "${ASSIGN_PUBLIC_IP}" == "Yes" && "$PUBLIC_IP" == "Pending"* ]]; then
+            echo ""
+            echo "→ Retrieving final public IP address..."
+            FINAL_LPAR_DETAILS=$(ibmcloud pi instance get "$LPAR_INSTANCE_ID" --json 2>/dev/null || echo "{}")
+            
+            FINAL_PUBLIC_IP=$(echo "$FINAL_LPAR_DETAILS" | jq -r '
+                .networks[]? | select(.externalIP != null) | .externalIP
+            ' 2>/dev/null | head -n 1)
+            
+            if [[ -n "$FINAL_PUBLIC_IP" && "$FINAL_PUBLIC_IP" != "null" ]]; then
+                PUBLIC_IP="$FINAL_PUBLIC_IP"
+                echo "✓ Public IP assigned: ${PUBLIC_IP}"
+            else
+                PUBLIC_IP="Check PowerVS Console (may take 2-3 minutes to appear)"
+                echo "⚠ Public IP not yet visible - check PowerVS console"
+            fi
+        fi
+        
         break
     fi
     
@@ -461,25 +516,26 @@ echo "  Status:          ✓ SUCCESS"
 echo "  LPAR Name:       ${LPAR_NAME}"
 echo "  Instance ID:     ${LPAR_INSTANCE_ID}"
 echo "  Final Status:    ${STATUS}"
-echo "  Private IP:      ${PRIVATE_IP}"
-echo "  Public IP:       ${PUBLIC_IP}"
-echo "  Subnet:          ${SUBNET_ID}"
 echo ""
-echo "  Network Access:"
-if [[ "${PUBLIC_IP}" != "Not Assigned" && "${PUBLIC_IP}" != "Not Available"* && "${PUBLIC_IP}" != "Assigned but not"* ]]; then
-    echo "  ✓ Private network: ${PRIVATE_IP}"
-    echo "  ✓ Public network:  ${PUBLIC_IP}"
-    echo "    → Job 4 can SSH to public IP for IP reconfiguration"
-else
-    echo "  ✓ Private network: ${PRIVATE_IP}"
-    echo "  ⚠ Public network:  ${PUBLIC_IP}"
-    echo "    → Verify public IP in PowerVS console if needed"
+echo "  Network Configuration:"
+echo "  +--------------------------------------------------------------+"
+echo "  | Private IP:      ${PRIVATE_IP}"
+if [[ "${ASSIGN_PUBLIC_IP}" == "Yes" ]]; then
+echo "  | Public IP:       ${PUBLIC_IP}"
+echo "  | Public Subnet:   ${PUBLIC_SUBNET_NAME} (${PUBLIC_SUBNET_ID})"
 fi
+echo "  +--------------------------------------------------------------+"
 echo ""
+if [[ "${ASSIGN_PUBLIC_IP}" == "Yes" && "$PUBLIC_IP" != "Check PowerVS"* && "$PUBLIC_IP" != "Pending"* ]]; then
+echo "  SSH Access:"
+echo "  → Job 4 can connect via: ${PUBLIC_IP}"
+echo "  → Allows automated IP reconfiguration"
+echo ""
+fi
 echo "  Next Steps:"
-echo "  - LPAR is in ${STATUS} state and ready for volume attachment"
-echo "  - Run Job 2 (volume cloning) to restore OS and data"
-echo "  - Run Job 4 (IP reconfiguration) after Job 2 completes"
+echo "  1. Run Job 2 (volume cloning) to restore OS and data"
+echo "  2. Run Job 4 (IP reconfiguration) to set correct private IP"
+echo "  3. Run your backup scripts against private IP: ${PRIVATE_IP}"
 echo ""
 echo "========================================================================"
 echo ""
@@ -489,10 +545,6 @@ trap - ERR
 
 ################################################################################
 # OPTIONAL STAGE: TRIGGER NEXT JOB (Job 2)
-# Logic:
-#   1. Check if RUN_ATTACH_JOB environment variable is set to "Yes"
-#   2. If yes, switch to Code Engine project and submit Job 2
-#   3. Capture and validate jobrun submission
 ################################################################################
 echo "========================================================================"
 echo " OPTIONAL STAGE: CHAIN TO VOLUME CLONE PROCESS"
@@ -513,12 +565,10 @@ if [[ "${RUN_ATTACH_JOB:-No}" == "Yes" ]]; then
     
     echo "  Submitting Code Engine job: snap-ops-2..."
     
-    # Capture full output (stdout + stderr)
     RAW_SUBMISSION=$(ibmcloud ce jobrun submit \
         --job snap-ops-2 \
         --output json 2>&1)
     
-    # Extract jobrun name from response
     NEXT_RUN=$(echo "$RAW_SUBMISSION" | jq -r '.metadata.name // .name // empty' 2>/dev/null || true)
     
     if [[ -z "$NEXT_RUN" ]]; then
