@@ -51,7 +51,7 @@ readonly API_VERSION="2024-02-28"
 # Network Configuration
 readonly SUBNET_ID="9b9c414e-aa95-41aa-8ed2-40141e0c42fd"
 readonly PRIVATE_IP="192.168.10.35"
-readonly PUBLIC_SUBNET_NAME="public-net-ibmi-backup"
+readonly PUBLIC_SUBNET_ID="7a6fcf39-089a-4a76-adc1-31a500c4e567"
 readonly KEYPAIR_NAME="murph2"
 
 # LPAR Specifications
@@ -72,7 +72,6 @@ readonly INITIAL_WAIT=45
 CURRENT_STEP="INITIALIZATION"
 LPAR_INSTANCE_ID=""
 IAM_TOKEN=""
-PUBLIC_SUBNET_ID=""
 JOB_SUCCESS=0
 
 echo "Configuration loaded successfully."
@@ -159,26 +158,6 @@ echo "------------------------------------------------------------------------"
 echo ""
 
 ################################################################################
-# STAGE 1.5: PUBLIC SUBNET SETUP
-################################################################################
-
-echo "→ Checking for public subnet: ${PUBLIC_SUBNET_NAME}..."
-
-PUBLIC_SUBNET_ID=$(ibmcloud pi subnet list --json 2>/dev/null | jq -r \
-    --arg name "$PUBLIC_SUBNET_NAME" \
-    'if type == "array" then .[] | select(.name == $name) | .id else empty end' 2>/dev/null | head -n 1)
-
-if [[ -n "$PUBLIC_SUBNET_ID" && "$PUBLIC_SUBNET_ID" != "null" ]]; then
-    echo "✓ Public subnet exists: ${PUBLIC_SUBNET_ID}"
-else
-    echo "→ Creating public subnet..."
-    PUBLIC_SUBNET_ID=$(ibmcloud pi subnet create "$PUBLIC_SUBNET_NAME" \
-        --net-type public --json 2>/dev/null | jq -r '.id // .networkID')
-    echo "✓ Public subnet created: ${PUBLIC_SUBNET_ID}"
-fi
-echo ""
-
-################################################################################
 # STAGE 1.5: IAM TOKEN RETRIEVAL
 # Logic:
 #   1. Exchange API key for IAM bearer token via OAuth endpoint
@@ -250,6 +229,11 @@ PAYLOAD=$(cat <<EOF
 EOF
 )
 
+echo "  Network Configuration:"
+echo "    - Private: ${SUBNET_ID} (IP: ${PRIVATE_IP})"
+echo "    - Public:  ${PUBLIC_SUBNET_ID}"
+echo ""
+
 API_URL="https://${REGION}.power-iaas.cloud.ibm.com/pcloud/v1/cloud-instances/${CLOUD_INSTANCE_ID}/pvm-instances?version=${API_VERSION}"
 
 echo "→ Submitting LPAR creation request to PowerVS API..."
@@ -309,7 +293,8 @@ echo "  ┌───────────────────────
 echo "  │ Name:        ${LPAR_NAME}"
 echo "  │ Instance ID: ${LPAR_INSTANCE_ID}"
 echo "  │ Private IP:  ${PRIVATE_IP}"
-echo "  │ Subnet:      ${SUBNET_ID}"
+echo "  │ Private Net: ${SUBNET_ID}"
+echo "  │ Public Net:  ${PUBLIC_SUBNET_ID}"
 echo "  │ CPU Cores:   ${PROCESSORS}"
 echo "  │ Memory:      ${MEMORY_GB} GB"
 echo "  │ Proc Type:   ${PROC_TYPE}"
@@ -390,7 +375,8 @@ echo "  LPAR Name:       ${LPAR_NAME}"
 echo "  Instance ID:     ${LPAR_INSTANCE_ID}"
 echo "  Final Status:    ${STATUS}"
 echo "  Private IP:      ${PRIVATE_IP}"
-echo "  Subnet:          ${SUBNET_ID}"
+echo "  Private Subnet:  ${SUBNET_ID}"
+echo "  Public Subnet:   ${PUBLIC_SUBNET_ID}"
 echo ""
 
 # Query for public IP
