@@ -51,7 +51,7 @@ readonly API_VERSION="2024-02-28"
 # Network Configuration
 readonly SUBNET_ID="9b9c414e-aa95-41aa-8ed2-40141e0c42fd"
 readonly PRIVATE_IP="192.168.10.35"
-readonly PUBLIC_SUBNET_ID="7a6fcf39-089a-4a76-adc1-31a500c4e567"
+readonly PUBLIC_SUBNET_NAME="public-net-$(date +"%Y%m%d%H%M%S")"  # Unique name with timestamp
 readonly KEYPAIR_NAME="murph2"
 
 # LPAR Specifications
@@ -72,6 +72,7 @@ readonly INITIAL_WAIT=45
 CURRENT_STEP="INITIALIZATION"
 LPAR_INSTANCE_ID=""
 IAM_TOKEN=""
+PUBLIC_SUBNET_ID=""
 JOB_SUCCESS=0
 
 echo "Configuration loaded successfully."
@@ -83,7 +84,8 @@ echo ""
 # Logic:
 #   1. Identifies the failed step for debugging
 #   2. Attempts to delete partially created LPAR if instance ID exists
-#   3. Logs cleanup status and exits with failure code
+#   3. Attempts to delete partially created public subnet if ID exists
+#   4. Logs cleanup status and exits with failure code
 ################################################################################
 rollback() {
     echo ""
@@ -93,7 +95,7 @@ rollback() {
     echo "Error occurred in step: ${CURRENT_STEP}"
     echo "------------------------------------------------------------------------"
     
-    # Only attempt LPAR cleanup if we got far enough to create one
+    # Attempt LPAR cleanup if we got far enough to create one
     if [[ -n "${LPAR_INSTANCE_ID}" ]]; then
         echo "Attempting cleanup of partially created LPAR: ${LPAR_NAME}"
         echo "Instance ID: ${LPAR_INSTANCE_ID}"
@@ -104,7 +106,21 @@ rollback() {
             echo "✗ LPAR cleanup failed - manual intervention required"
         fi
     else
-        echo "No LPAR instance ID found - skipping resource cleanup"
+        echo "No LPAR instance ID found - skipping LPAR cleanup"
+    fi
+    
+    # Attempt public subnet cleanup if we got far enough to create one
+    if [[ -n "${PUBLIC_SUBNET_ID}" ]]; then
+        echo "Attempting cleanup of partially created public subnet: ${PUBLIC_SUBNET_NAME}"
+        echo "Subnet ID: ${PUBLIC_SUBNET_ID}"
+        
+        if ibmcloud pi subnet delete "$PUBLIC_SUBNET_ID" 2>/dev/null; then
+            echo "✓ Public subnet cleanup successful"
+        else
+            echo "✗ Public subnet cleanup failed - manual intervention required"
+        fi
+    else
+        echo "No public subnet ID found - skipping subnet cleanup"
     fi
     
     echo ""
@@ -126,7 +142,7 @@ trap rollback ERR
 CURRENT_STEP="IBM_CLOUD_LOGIN"
 
 echo "========================================================================"
-echo " STAGE 1/2: IBM CLOUD AUTHENTICATION & WORKSPACE TARGETING"
+echo " STAGE 1/3: IBM CLOUD AUTHENTICATION & WORKSPACE TARGETING"
 echo "========================================================================"
 echo ""
 
@@ -153,12 +169,49 @@ echo "✓ PowerVS workspace targeted"
 
 echo ""
 echo "------------------------------------------------------------------------"
-echo " Stage 1 Complete: Ready for LPAR provisioning"
+echo " Stage 1 Complete: Authentication successful"
 echo "------------------------------------------------------------------------"
 echo ""
 
 ################################################################################
-# STAGE 1.5: IAM TOKEN RETRIEVAL
+# STAGE 1.5: CREATE PUBLIC SUBNET
+# Logic:
+#   1. Create a new public subnet with unique timestamped name
+#   2. Extract and validate subnet ID from response
+################################################################################
+CURRENT_STEP="CREATE_PUBLIC_SUBNET"
+
+echo "========================================================================"
+echo " STAGE 2/3: PUBLIC SUBNET CREATION"
+echo "========================================================================"
+echo ""
+
+echo "→ Creating public subnet: ${PUBLIC_SUBNET_NAME}..."
+
+PUBLIC_SUBNET_JSON=$(ibmcloud pi subnet create "$PUBLIC_SUBNET_NAME" \
+    --net-type public \
+    --json 2>/dev/null)
+
+PUBLIC_SUBNET_ID=$(echo "$PUBLIC_SUBNET_JSON" | jq -r '.id // .networkID // empty' 2>/dev/null || true)
+
+if [[ -z "$PUBLIC_SUBNET_ID" || "$PUBLIC_SUBNET_ID" == "null" ]]; then
+    echo "✗ ERROR: Failed to create public subnet"
+    echo "Response: $PUBLIC_SUBNET_JSON"
+    exit 1
+fi
+
+echo "✓ Public subnet created successfully"
+echo "  Name: ${PUBLIC_SUBNET_NAME}"
+echo "  ID:   ${PUBLIC_SUBNET_ID}"
+echo ""
+
+echo "------------------------------------------------------------------------"
+echo " Stage 2 Complete: Public subnet ready"
+echo "------------------------------------------------------------------------"
+echo ""
+
+################################################################################
+# STAGE 1.75: IAM TOKEN RETRIEVAL
 # Logic:
 #   1. Exchange API key for IAM bearer token via OAuth endpoint
 #   2. Parse JSON response to extract access token
@@ -199,7 +252,7 @@ echo ""
 CURRENT_STEP="CREATE_LPAR"
 
 echo "========================================================================"
-echo " STAGE 2/2: LPAR CREATION & DEPLOYMENT"
+echo " STAGE 3/3: LPAR CREATION & DEPLOYMENT"
 echo "========================================================================"
 echo ""
 
@@ -231,7 +284,7 @@ EOF
 
 echo "  Network Configuration:"
 echo "    - Private: ${SUBNET_ID} (IP: ${PRIVATE_IP})"
-echo "    - Public:  ${PUBLIC_SUBNET_ID}"
+echo "    - Public:  ${PUBLIC_SUBNET_ID} (${PUBLIC_SUBNET_NAME})"
 echo ""
 
 API_URL="https://${REGION}.power-iaas.cloud.ibm.com/pcloud/v1/cloud-instances/${CLOUD_INSTANCE_ID}/pvm-instances?version=${API_VERSION}"
@@ -294,7 +347,7 @@ echo "  │ Name:        ${LPAR_NAME}"
 echo "  │ Instance ID: ${LPAR_INSTANCE_ID}"
 echo "  │ Private IP:  ${PRIVATE_IP}"
 echo "  │ Private Net: ${SUBNET_ID}"
-echo "  │ Public Net:  ${PUBLIC_SUBNET_ID}"
+echo "  │ Public Net:  ${PUBLIC_SUBNET_ID} (${PUBLIC_SUBNET_NAME})"
 echo "  │ CPU Cores:   ${PROCESSORS}"
 echo "  │ Memory:      ${MEMORY_GB} GB"
 echo "  │ Proc Type:   ${PROC_TYPE}"
@@ -358,7 +411,7 @@ done
 
 echo ""
 echo "------------------------------------------------------------------------"
-echo " Stage 2 Complete: LPAR provisioned and ready"
+echo " Stage 3 Complete: LPAR provisioned and ready"
 echo "------------------------------------------------------------------------"
 echo ""
 
@@ -376,7 +429,7 @@ echo "  Instance ID:     ${LPAR_INSTANCE_ID}"
 echo "  Final Status:    ${STATUS}"
 echo "  Private IP:      ${PRIVATE_IP}"
 echo "  Private Subnet:  ${SUBNET_ID}"
-echo "  Public Subnet:   ${PUBLIC_SUBNET_ID}"
+echo "  Public Subnet:   ${PUBLIC_SUBNET_ID} (${PUBLIC_SUBNET_NAME})"
 echo ""
 
 # Query for public IP
@@ -457,3 +510,4 @@ JOB_SUCCESS=1
 
 sleep 1
 exit 0
+
