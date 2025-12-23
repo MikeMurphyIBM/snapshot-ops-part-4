@@ -42,12 +42,12 @@ RUN ibmcloud plugin install code-engine -f
 # -----------------------------------------------------------
 # Copy script into container
 # -----------------------------------------------------------
-COPY job4-ip.sh /job4-ip.sh
+COPY Job4-Create.sh /Job4-Create.sh
 
 # Normalize line endings + ensure script is executable
-RUN sed -i 's/\r$//' /job4-ip.sh && chmod +x /job4-ip.sh
+RUN sed -i 's/\r$//' /Job4-Create.sh && chmod +x /Job4-Create.sh
 
 # -----------------------------------------------------------
 # Run the script
 # -----------------------------------------------------------
-CMD ["/job4-ip.sh"]
+CMD ["/Job4-Create.sh"]
