@@ -51,7 +51,8 @@ readonly API_VERSION="2024-02-28"
 # Network Configuration
 readonly SUBNET_ID="9b9c414e-aa95-41aa-8ed2-40141e0c42fd"
 readonly PRIVATE_IP="192.168.10.35"
-readonly PUBLIC_SUBNET_NAME="public-net-$(date +"%Y%m%d%H%M%S")"  # Unique name with timestamp
+readonly PUBLIC_SUBNET_NAME="public-net-ibmi-backup"
+readonly PUBLIC_SUBNET_ID="7a6fcf39-089a-4a76-adc1-31a500c4e567"
 readonly KEYPAIR_NAME="murph2"
 
 # LPAR Specifications
@@ -72,7 +73,6 @@ readonly INITIAL_WAIT=45
 CURRENT_STEP="INITIALIZATION"
 LPAR_INSTANCE_ID=""
 IAM_TOKEN=""
-PUBLIC_SUBNET_ID=""
 JOB_SUCCESS=0
 
 echo "Configuration loaded successfully."
@@ -84,8 +84,7 @@ echo ""
 # Logic:
 #   1. Identifies the failed step for debugging
 #   2. Attempts to delete partially created LPAR if instance ID exists
-#   3. Attempts to delete partially created public subnet if ID exists
-#   4. Logs cleanup status and exits with failure code
+#   3. Logs cleanup status and exits with failure code
 ################################################################################
 rollback() {
     echo ""
@@ -107,20 +106,6 @@ rollback() {
         fi
     else
         echo "No LPAR instance ID found - skipping LPAR cleanup"
-    fi
-    
-    # Attempt public subnet cleanup if we got far enough to create one
-    if [[ -n "${PUBLIC_SUBNET_ID}" ]]; then
-        echo "Attempting cleanup of partially created public subnet: ${PUBLIC_SUBNET_NAME}"
-        echo "Subnet ID: ${PUBLIC_SUBNET_ID}"
-        
-        if ibmcloud pi subnet delete "$PUBLIC_SUBNET_ID" 2>/dev/null; then
-            echo "✓ Public subnet cleanup successful"
-        else
-            echo "✗ Public subnet cleanup failed - manual intervention required"
-        fi
-    else
-        echo "No public subnet ID found - skipping subnet cleanup"
     fi
     
     echo ""
@@ -174,34 +159,35 @@ echo "------------------------------------------------------------------------"
 echo ""
 
 ################################################################################
-# STAGE 1.5: CREATE PUBLIC SUBNET
+# STAGE 1.5: VERIFY PUBLIC SUBNET EXISTS
 # Logic:
-#   1. Create a new public subnet with unique timestamped name
-#   2. Extract and validate subnet ID from response
+#   1. Query for existing public subnet
+#   2. Validate it exists in the workspace
 ################################################################################
-CURRENT_STEP="CREATE_PUBLIC_SUBNET"
+CURRENT_STEP="VERIFY_PUBLIC_SUBNET"
 
 echo "========================================================================"
-echo " STAGE 2/3: PUBLIC SUBNET CREATION"
+echo " STAGE 2/3: PUBLIC SUBNET VERIFICATION"
 echo "========================================================================"
 echo ""
 
-echo "→ Creating public subnet: ${PUBLIC_SUBNET_NAME}..."
+echo "→ Verifying public subnet exists: ${PUBLIC_SUBNET_NAME}..."
 
-PUBLIC_SUBNET_JSON=$(ibmcloud pi subnet create "$PUBLIC_SUBNET_NAME" \
-    --net-type public \
-    --json 2>/dev/null)
+set +e
+SUBNET_CHECK=$(ibmcloud pi subnet get "$PUBLIC_SUBNET_ID" --json 2>/dev/null)
+SUBNET_CHECK_RC=$?
+set -e
 
-PUBLIC_SUBNET_ID=$(echo "$PUBLIC_SUBNET_JSON" | jq -r '.id // .networkID // empty' 2>/dev/null || true)
-
-if [[ -z "$PUBLIC_SUBNET_ID" || "$PUBLIC_SUBNET_ID" == "null" ]]; then
-    echo "✗ ERROR: Failed to create public subnet"
-    echo "Response: $PUBLIC_SUBNET_JSON"
+if [[ $SUBNET_CHECK_RC -ne 0 ]]; then
+    echo "✗ ERROR: Public subnet ${PUBLIC_SUBNET_NAME} (${PUBLIC_SUBNET_ID}) not found"
+    echo "  Please verify the subnet exists in the PowerVS workspace"
     exit 1
 fi
 
-echo "✓ Public subnet created successfully"
-echo "  Name: ${PUBLIC_SUBNET_NAME}"
+SUBNET_NAME_ACTUAL=$(echo "$SUBNET_CHECK" | jq -r '.name // empty' 2>/dev/null || true)
+
+echo "✓ Public subnet verified"
+echo "  Name: ${SUBNET_NAME_ACTUAL}"
 echo "  ID:   ${PUBLIC_SUBNET_ID}"
 echo ""
 
@@ -510,4 +496,3 @@ JOB_SUCCESS=1
 
 sleep 1
 exit 0
-
