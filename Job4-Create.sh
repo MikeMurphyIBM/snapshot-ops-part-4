@@ -50,12 +50,12 @@ readonly API_VERSION="2024-02-28"
 
 # Network Configuration
 readonly SUBNET_ID="9b9c414e-aa95-41aa-8ed2-40141e0c42fd"
-readonly PRIVATE_IP="192.168.10.35"
+readonly PRIVATE_IP="192.168.10.85"
 readonly PUBLIC_SUBNET_NAME="public-net-$(date +"%Y%m%d%H%M%S")"  # Unique name with timestamp
 readonly KEYPAIR_NAME="murph2"
 
 # LPAR Specifications
-readonly LPAR_NAME="murphy-prod-clone"
+readonly LPAR_NAME="murphy-prod-clone85"
 readonly MEMORY_GB=2
 readonly PROCESSORS=0.25
 readonly PROC_TYPE="shared"
